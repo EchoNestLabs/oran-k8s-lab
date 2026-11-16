@@ -227,3 +227,7 @@ deploy/monitoring/prometheus.yml
 .upstream/
 deploy/nms/nginx/nms.conf
 deploy/nms/data/
+
+# local dev tooling, not part of the published repo
+.gitleaks.toml
+.pre-commit-config.yaml
