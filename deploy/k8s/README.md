@@ -74,8 +74,9 @@ the chart never silently falls back to a registry.
 
 ## AMI
 
-The whole lab ships as one private AMI (k3s + preloaded containerd images +
-chart + bring-up service). Hardware requirement: the gNB binary is built on
+The whole lab ships as one public AMI (k3s + preloaded containerd images +
+chart + bring-up service). See the top-level README for the AMI ID and
+launch notes. Hardware requirement: the gNB binary is built on
 Sapphire Rapids, so the instance MUST be `c7i` / `r8i` / `m7i` class (a t3
 instance dies with SIGILL at gNB start). Boot is fully hands-off: on first
 boot the bring-up unit converges the lab (~10–20 min including attach) and
