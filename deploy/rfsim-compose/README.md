@@ -88,9 +88,11 @@ state ("KPM indications" FAILs with nothing in the last 15 s).
 
 ## Optional add-ons
 
-- `../nms/` — open5gs-nms web NMS with the live 5GC topology (baked into
-  the AMI, started with `./start.sh`). Note the open5gs pin here also
+- `../nms/`, open5gs-nms web NMS with the live 5GC topology. The current
+  machine image runs the k8s chart, which ships the NMS as a built-in
+  add-on; in this compose lab it is an optional add-on (see `../nms/`
+  for its compose bring-up). Note the open5gs pin here also
   feeds it: it needs the v2.8.0+ JSON info endpoints and the `metrics:`
   blocks in `config/open5gs/{amf,smf}.yaml`.
-- `../monitoring/` — external monitoring tier (node-exporter + cAdvisor
+- `../monitoring/`, external monitoring tier (node-exporter + cAdvisor
   on this VM, Prometheus + Grafana elsewhere).
