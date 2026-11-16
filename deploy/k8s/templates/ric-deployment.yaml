@@ -1,0 +1,50 @@
+{{- /* FlexRIC nearRT-RIC: Deployment + headless Service (E2 on pod IP).
+     The gNB connects at start, so this must be Running before gnb.
+     Values toggle: ric.enabled. */}}
+{{- if .Values.ric.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-ric
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "ric") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "ric") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "ric") | nindent 8 }}
+    spec:
+      containers:
+        - name: ric
+          image: "{{ .Values.images.ric.repository }}:{{ .Values.images.ric.tag }}"
+          imagePullPolicy: Never
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              # NEAR_RIC_IP must be the pod IP (downward API). The RIC reads the
+              # conf from the baked-in path, so sed it IN PLACE. E2AP/KPM
+              # versions are compile-time (values ricBuild.*; image must match).
+              sed -i "s/^NEAR_RIC_IP = .*/NEAR_RIC_IP = ${POD_IP}/" \
+                /usr/local/etc/flexric/flexric.conf
+              exec /usr/local/bin/nearRT-RIC
+          env:
+            {{- include "oran-lab.podip" (dict "podIpEnvVar" "POD_IP") | nindent 12 }}
+          ports:
+            - containerPort: 36421
+              name: e2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-ric
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "ric") | nindent 4 }}
+spec:
+  clusterIP: None   # gNB dials the pod IP for E2
+  selector:
+    app.kubernetes.io/name: ric
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 36421
+      name: e2
+{{- end }}

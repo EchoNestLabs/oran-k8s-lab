@@ -1,0 +1,234 @@
+{{- /* NMS add-on: open5gs-nms topology/monitoring UI. Values toggle: nms.enabled.
+
+  Port of the compose-era deploy/nms stack to k8s. Proven on-node by the
+  2026-11-12 spike. Three workloads:
+    - backend  (open5gs-nms backend): needs hostPID so its /proc fallback can
+      see the NF daemon processes (open5gs-amfd, open5gs-smfd, mongod, ...);
+      an init + sidecar container sync the live NF yamls out of the NF pods
+      via /proc/<pid>/root into the shared /etc/open5gs emptyDir the backend
+      reads. The NF process "comm" names match the upstream NMS
+      SERVICE_UNIT_MAP exactly, so topology nodes go green on real liveness.
+    - frontend (open5gs-nms frontend): static build served by `serve`.
+    - nginx    : single UI entry on hostPort 8888 (api/ + ws + frontend).
+
+  Everything here is deliberately OUTSIDE the bring-up/helm-test critical
+  path: lab-bringup and the lab-verify job do not reference any of these
+  objects, and nothing in core/ran/ric points at the nms services. */}}
+{{- if .Values.nms.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-nms-nginx-conf
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nms") | nindent 4 }}
+data:
+  nms.conf: |
+    map $http_upgrade $connection_upgrade { default upgrade; "" close; }
+    upstream backend {
+      server {{ .Release.Name }}-nms-backend.{{ .Release.Namespace }}.svc.cluster.local:3001;
+      keepalive 32;
+    }
+    upstream frontend {
+      server {{ .Release.Name }}-nms-frontend.{{ .Release.Namespace }}.svc.cluster.local:8083;
+      keepalive 32;
+    }
+    server {
+      listen 8888;
+      server_name _;
+      location /ws {
+        proxy_pass http://backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+      }
+      location /api/ {
+        proxy_pass http://backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        client_max_body_size 10m;
+      }
+      location / {
+        proxy_pass http://frontend;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      }
+    }
+---
+# Sync /etc/open5gs/<nf>.yaml from the live NF pods. open5gs daemons run with
+# `-c /tmp/<nf>.yaml` (see the core templates' heredoc configs), so
+# /proc/<pid>/root/tmp/<nf>.yaml is exactly the config the daemon parsed —
+# a single source of truth, no config duplication. The sidecar re-syncs every
+# 30 s so NF pod restarts (fresh PIDs) are absorbed without NMS restarts.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-nms-backend
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nms") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "nms-backend") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nms-backend") | nindent 8 }}
+    spec:
+      hostPID: true
+      volumes:
+        - name: open5gs-config
+          emptyDir: {}
+        - name: nms-data
+          # Persist the auth DB (admin password changes, sessions) across pod
+          # restarts AND node reboots. emptyDir wiped it every boot, resetting
+          # the admin password. Single-node k3s: hostPath is safe here.
+          # Fresh AMI boot: directory absent -> created empty -> first-run
+          # seed from Secret/random applies; user changes persist from then on.
+          hostPath:
+            path: /var/lib/lab-nms
+            type: DirectoryOrCreate
+      initContainers:
+        - name: config-sync-init
+          image: "{{ .Values.images.nmsBackend.repository }}:{{ .Values.images.nmsBackend.tag }}"
+          imagePullPolicy: Never
+          securityContext: { privileged: true }
+          volumeMounts: [{ name: open5gs-config, mountPath: /etc/open5gs }]
+          command: ["sh", "-c"]
+          args:
+            - |
+              for nf in amf smf upf nrf ausf udm udr pcf nssf bsf; do
+                pid=""
+                for d in /proc/[0-9]*; do
+                  [ "$(cat $d/comm 2>/dev/null)" = "open5gs-${nf}d" ] && pid=$(basename $d) && break
+                done
+                if [ -n "$pid" ] && [ -f "/proc/$pid/root/tmp/$nf.yaml" ]; then
+                  cp "/proc/$pid/root/tmp/$nf.yaml" "/etc/open5gs/$nf.yaml"
+                  echo "synced $nf.yaml from pid $pid"
+                else
+                  echo "WARN: no open5gs-${nf}d process with /tmp/$nf.yaml found yet"
+                fi
+              done
+      containers:
+        - name: backend
+          image: "{{ .Values.images.nmsBackend.repository }}:{{ .Values.images.nmsBackend.tag }}"
+          imagePullPolicy: Never
+          securityContext: { privileged: true }
+          env:
+            - { name: TZ, value: Europe/Stockholm }
+            - { name: NODE_ENV, value: production }
+            - { name: PORT, value: "3001" }
+            - { name: WS_PORT, value: "3002" }
+            - name: MONGODB_URI
+              value: mongodb://{{ .Release.Name }}-mongodb/open5gs
+            - { name: LOG_LEVEL, value: info }
+            - { name: AUTH_DB_PATH, value: /app/data/auth.db }
+            - { name: SESSION_MAX_AGE, value: "86400" }
+            - name: FIRST_RUN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lab-nms-firstrun
+                  key: password
+                  # No secret -> env absent -> backend generates a random
+                  # first-run password (printed to the backend pod logs).
+                  optional: true
+            - { name: COOKIE_SECURE, value: "false" }
+          ports: [{ containerPort: 3001 }, { containerPort: 3002 }]
+          volumeMounts:
+            - { name: open5gs-config, mountPath: /etc/open5gs, readOnly: true }
+            - { name: nms-data, mountPath: /app/data }
+        - name: config-sync
+          image: "{{ .Values.images.nmsBackend.repository }}:{{ .Values.images.nmsBackend.tag }}"
+          imagePullPolicy: Never
+          securityContext: { privileged: true }
+          volumeMounts: [{ name: open5gs-config, mountPath: /etc/open5gs }]
+          command: ["sh", "-c"]
+          args:
+            - |
+              while true; do
+                for nf in amf smf upf nrf ausf udm udr pcf nssf bsf; do
+                  pid=""
+                  for d in /proc/[0-9]*; do
+                    [ "$(cat $d/comm 2>/dev/null)" = "open5gs-${nf}d" ] && pid=$(basename $d) && break
+                  done
+                  if [ -n "$pid" ] && [ -f "/proc/$pid/root/tmp/$nf.yaml" ]; then
+                    cp "/proc/$pid/root/tmp/$nf.yaml" "/etc/open5gs/$nf.yaml.tmp" 2>/dev/null \
+                      && mv "/etc/open5gs/$nf.yaml.tmp" "/etc/open5gs/$nf.yaml"
+                  fi
+                done
+                sleep 30
+              done
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-nms-backend
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nms") | nindent 4 }}
+spec:
+  selector: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "nms-backend") | nindent 4 }}
+  ports:
+    - { name: api, port: 3001, targetPort: 3001 }
+    - { name: ws,  port: 3002, targetPort: 3002 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-nms-frontend
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nms") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "nms-frontend") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nms-frontend") | nindent 8 }}
+    spec:
+      containers:
+        - name: frontend
+          image: "{{ .Values.images.nmsFrontend.repository }}:{{ .Values.images.nmsFrontend.tag }}"
+          imagePullPolicy: Never
+          command: ["serve", "-s", "dist", "-l", "8083"]
+          ports: [{ containerPort: 8083 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-nms-frontend
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nms") | nindent 4 }}
+spec:
+  selector: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "nms-frontend") | nindent 4 }}
+  ports: [{ name: http, port: 8083, targetPort: 8083 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-nms-nginx
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nms") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "nms-nginx") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nms-nginx") | nindent 8 }}
+    spec:
+      containers:
+        - name: nginx
+          image: "{{ .Values.images.nmsNginx.repository }}:{{ .Values.images.nmsNginx.tag }}"
+          imagePullPolicy: Never
+          ports: [{ containerPort: 8888, hostPort: {{ .Values.nms.hostPort }} }]
+          volumeMounts:
+            - { name: conf, mountPath: /etc/nginx/conf.d }
+      volumes:
+        - name: conf
+          configMap: { name: {{ .Release.Name }}-nms-nginx-conf }
+{{- end }}

@@ -1,0 +1,82 @@
+{{- /* SMF: SBI to nrf; pfcp to upf (headless). Values toggle: core.enabled */}}
+{{- if .Values.core.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-smf
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "smf") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "smf") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "smf") | nindent 8 }}
+    spec:
+      containers:
+        - name: smf
+          image: "{{ .Values.images.open5gs.repository }}:{{ .Values.images.open5gs.tag }}"
+          imagePullPolicy: Never
+          env:
+            - name: OGS_DB_URI
+              value: mongodb://{{ .Release.Name }}-mongodb/open5gs
+            {{- /* metrics server binds the pod IP: the NMS reads this address
+               from the synced /etc/open5gs/smf.yaml and dials it pod-to-pod. */}}
+            {{- include "oran-lab.podip" (dict "podIpEnvVar" "POD_IP") | nindent 12 }}
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              # Full K8s-native config: NRF via SBI, UPF via headless DNS.
+              cat > /tmp/smf.yaml <<YAML
+              smf:
+                sbi:
+                  server:
+                    - address: 0.0.0.0
+                      port: 7777
+                      advertise: "{{ .Release.Name }}-smf.{{ .Release.Namespace }}.svc.cluster.local:7777"
+                  client:
+                    nrf:
+                      - uri: http://{{ .Release.Name }}-nrf:7777
+                pfcp:
+                  server:
+                    - address: 0.0.0.0
+                  client:
+                    upf:
+                      - address: {{ .Release.Name }}-upf
+                gtpc:
+                  server:
+                    - address: 0.0.0.0
+                gtpu:
+                  server:
+                    - address: 0.0.0.0
+                metrics:
+                  server:
+                    - address: ${POD_IP}
+                      port: 9090
+                session:
+                  - subnet: 10.45.0.0/16
+                    gateway: 10.45.0.1
+                dns:
+                  - 8.8.8.8
+                  - 8.8.4.4
+                mtu: 1400
+              YAML
+              exec /usr/bin/open5gs-smfd -c /tmp/smf.yaml
+          ports:
+            - containerPort: 7777
+              name: sbi
+            - containerPort: 8805
+              protocol: UDP
+              name: pfcp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-smf
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "smf") | nindent 4 }}
+spec:
+  selector: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "smf") | nindent 4 }}
+  ports:
+    - port: 7777
+      name: sbi
+{{- end }}

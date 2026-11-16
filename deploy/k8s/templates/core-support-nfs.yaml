@@ -1,0 +1,173 @@
+{{- /* Supporting NFs for registration: ausf udm udr pcf bsf. AMF rejects all registrations (cause 90) without nausf-auth. Toggle: core.enabled */}}
+{{- if .Values.core.enabled }}
+{{- range $nf := list "ausf" "udm" "pcf" "bsf" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $.Release.Name }}-{{ $nf }}
+  labels: {{- include "oran-lab.labels" (dict "ctx" $ "component" $nf) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" $ "component" $nf) | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" $ "component" $nf) | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ $nf }}
+          image: "{{ $.Values.images.open5gs.repository }}:{{ $.Values.images.open5gs.tag }}"
+          imagePullPolicy: Never
+          {{- if eq $nf "pcf" }}
+          env:
+            - name: OGS_DB_URI
+              value: mongodb://{{ $.Release.Name }}-mongodb/open5gs
+          {{- end }}
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              cat > /tmp/{{ $nf }}.yaml <<'YAML'
+              {{- if eq $nf "pcf" }}
+              db_uri: mongodb://{{ $.Release.Name }}-mongodb/open5gs
+              {{- end }}
+              {{ $nf }}:
+                sbi:
+                  server:
+                    - address: 0.0.0.0
+                      port: 7777
+                      advertise: "{{ $.Release.Name }}-{{ $nf }}.{{ $.Release.Namespace }}.svc.cluster.local:7777"
+                  client:
+                    nrf:
+                      - uri: http://{{ $.Release.Name }}-nrf:7777
+              YAML
+              exec /usr/bin/open5gs-{{ $nf }}d -c /tmp/{{ $nf }}.yaml
+          ports:
+            - containerPort: 7777
+              name: sbi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $.Release.Name }}-{{ $nf }}
+  labels: {{- include "oran-lab.labels" (dict "ctx" $ "component" $nf) | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ $nf }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+  ports:
+    - port: 7777
+      name: sbi
+{{- end }}
+---
+{{- /* udr needs the DB like nrf did */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-udr
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "udr") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "udr") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "udr") | nindent 8 }}
+    spec:
+      containers:
+        - name: udr
+          image: "{{ .Values.images.open5gs.repository }}:{{ .Values.images.open5gs.tag }}"
+          imagePullPolicy: Never
+          env:
+            - name: OGS_DB_URI
+              value: mongodb://{{ .Release.Name }}-mongodb/open5gs
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              cat > /tmp/udr.yaml <<'YAML'
+              db_uri: mongodb://{{ .Release.Name }}-mongodb/open5gs
+              udr:
+                sbi:
+                  server:
+                    - address: 0.0.0.0
+                      port: 7777
+                      advertise: "{{ .Release.Name }}-udr.{{ .Release.Namespace }}.svc.cluster.local:7777"
+                  client:
+                    nrf:
+                      - uri: http://{{ .Release.Name }}-nrf:7777
+              YAML
+              exec /usr/bin/open5gs-udrd -c /tmp/udr.yaml
+          ports:
+            - containerPort: 7777
+              name: sbi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-udr
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "udr") | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: udr
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 7777
+      name: sbi
+---
+{{- /* nssf: the AMF consults it for slice->SMF selection during PDU session setup */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-nssf
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nssf") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "nssf") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nssf") | nindent 8 }}
+    spec:
+      containers:
+        - name: nssf
+          image: "{{ .Values.images.open5gs.repository }}:{{ .Values.images.open5gs.tag }}"
+          imagePullPolicy: Never
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              cat > /tmp/nssf.yaml <<'YAML'
+              nssf:
+                sbi:
+                  server:
+                    - address: 0.0.0.0
+                      port: 7777
+                      advertise: "{{ .Release.Name }}-nssf.{{ .Release.Namespace }}.svc.cluster.local:7777"
+                  client:
+                    nrf:
+                      - uri: http://{{ .Release.Name }}-nrf:7777
+                    nsi:
+                      - uri: http://{{ .Release.Name }}-nrf:7777
+                        s_nssai:
+                          sst: 1
+                      - uri: http://{{ .Release.Name }}-nrf:7777
+                        s_nssai:
+                          sst: 2
+              YAML
+              exec /usr/bin/open5gs-nssfd -c /tmp/nssf.yaml
+          ports:
+            - containerPort: 7777
+              name: sbi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-nssf
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nssf") | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: nssf
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 7777
+      name: sbi
+{{- end }}

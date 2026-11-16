@@ -1,0 +1,67 @@
+{{- /* Sample xApps: built FROM the ric image so SM libs match. Values toggle:
+     xapps.enabled. kpm-exporter exposes metrics 9800 for Prometheus. */}}
+{{- if .Values.xapps.enabled }}
+{{- range $xapp := .Values.xapps.list }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $.Release.Name }}-xapp-{{ $xapp.name }}
+  labels: {{- include "oran-lab.labels" (dict "ctx" $ "component" (printf "xapp-%s" $xapp.name)) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: xapp-{{ $xapp.name }}
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" $ "component" (printf "xapp-%s" $xapp.name)) | nindent 8 }}
+      {{- if $xapp.metricsPort }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ $xapp.metricsPort }}"
+        prometheus.io/path: "{{ $xapp.metricsPath | default "/metrics" }}"
+      {{- end }}
+    spec:
+      initContainers:
+        {{- include "oran-lab.waitfor" (dict
+              "ctx" $
+              "waitName" "wait-ric"
+              "waitHost" (printf "%s-ric" $.Release.Name)
+              "waitPort" "36421"
+              "waitProto" "sctp") | nindent 8 }}
+      containers:
+        - name: xapp
+          image: "{{ $.Values.images.xapps.repository }}:{{ $.Values.images.xapps.tag }}"
+          imagePullPolicy: Never
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              # Point the xApp at the near-RT RIC pod IP (conf wants an IP, not a name).
+              # No 'exec': the command may be a shell loop, and then sh itself
+              # must stay as pid 1 (exec cannot run compound commands).
+              RIC_IP=$(getent hosts {{ $.Release.Name }}-ric | awk '{print $1}')
+              sed -i "s/^NEAR_RIC_IP = .*/NEAR_RIC_IP = ${RIC_IP}/" /usr/local/etc/flexric/flexric.conf
+              {{ $xapp.command }}
+          {{- if $xapp.metricsPort }}
+          ports:
+            - containerPort: {{ $xapp.metricsPort }}
+              name: metrics
+          {{- end }}
+{{- end }}
+---
+{{- /* kpm-exporter metrics Service (ClusterIP is fine for scraping). */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-xapp-kpm-exporter
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "xapp-kpm-exporter") | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: xapp-kpm-exporter
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 9800
+      name: metrics
+{{- end }}

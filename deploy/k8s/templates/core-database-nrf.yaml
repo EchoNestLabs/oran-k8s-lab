@@ -1,0 +1,89 @@
+{{- /* Core 5GC: mongodb + nrf + amf + smf + upf. Values toggle: core.enabled */}}
+{{- if .Values.core.enabled }}
+{{- /* ---- mongodb ---- */}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-mongodb
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "mongodb") | nindent 4 }}
+spec:
+  serviceName: {{ .Release.Name }}-mongodb
+  replicas: 1
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "mongodb") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "mongodb") | nindent 8 }}
+    spec:
+      containers:
+        - name: mongodb
+          image: "{{ .Values.images.mongodb.repository }}:{{ .Values.images.mongodb.tag }}"
+          imagePullPolicy: Never
+          # Lab-grade: emptyDir, no PVC. Stale subscriber state across
+          # helm uninstall is worse than a fresh DB (Advisor note).
+          ports:
+            - containerPort: 27017
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-mongodb
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "mongodb") | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: mongodb
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 27017
+---
+{{- /* ---- nrf ---- */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-nrf
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nrf") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "nrf") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nrf") | nindent 8 }}
+    spec:
+      containers:
+        - name: nrf
+          image: "{{ .Values.images.open5gs.repository }}:{{ .Values.images.open5gs.tag }}"
+          imagePullPolicy: Never
+          env:
+            - name: OGS_DB_URI
+              value: mongodb://{{ .Release.Name }}-mongodb/open5gs
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              # K8s-native: bind SBI on all interfaces so other pods reach it
+              cat > /tmp/nrf.yaml <<'YAML'
+              nrf:
+                sbi:
+                  server:
+                    - address: 0.0.0.0
+                      port: 7777
+                      advertise: "{{ .Release.Name }}-nrf.{{ .Release.Namespace }}.svc.cluster.local:7777"
+              YAML
+              exec /usr/bin/open5gs-nrfd -c /tmp/nrf.yaml
+          ports:
+            - containerPort: 7777
+              name: sbi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-nrf
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "nrf") | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: nrf
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 7777
+      name: sbi
+{{- end }}

@@ -1,0 +1,18 @@
+[Unit]
+Description=Converge O-RAN rfsim lab (helm install + attach retries)
+Wants=network-online.target
+After=network-online.target k3s.service
+Requires=k3s.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/lab-bringup.sh
+# Convergence can outlive the script budget (attach flakiness); the script
+# exits 1 on failure and systemd retries the whole convergence.
+Restart=on-failure
+RestartSec=120
+TimeoutStartSec=3600
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target

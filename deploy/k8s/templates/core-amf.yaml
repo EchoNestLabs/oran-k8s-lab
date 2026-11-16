@@ -1,0 +1,113 @@
+{{- /* AMF: NGAP (SCTP 38412) must ride the pod IP -> headless Service.
+     Values toggle: core.enabled. */}}
+{{- if .Values.core.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-amf
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "amf") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "amf") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "amf") | nindent 8 }}
+    spec:
+      containers:
+        - name: amf
+          image: "{{ .Values.images.open5gs.repository }}:{{ .Values.images.open5gs.tag }}"
+          imagePullPolicy: Never
+          env:
+            {{- include "oran-lab.podip" (dict "podIpEnvVar" "POD_IP") | nindent 12 }}
+            - name: OGS_DB_URI
+              value: mongodb://{{ .Release.Name }}-mongodb/open5gs
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              # Full K8s-native config (heredoc, no leading spaces in output:
+              # the | block is dedented by yaml at pod-arg level).
+              cat > /tmp/amf.yaml <<YAML
+              amf:
+                amf_name: oai-amf
+                sbi:
+                  server:
+                    - address: 0.0.0.0
+                      port: 7777
+                      advertise: "{{ .Release.Name }}-amf.{{ .Release.Namespace }}.svc.cluster.local:7777"
+                  client:
+                    nrf:
+                      - uri: http://{{ .Release.Name }}-nrf:7777
+                ngap:
+                  server:
+                    - address: ${POD_IP}
+                metrics:
+                  server:
+                    # pod IP, not 0.0.0.0: the NMS dials this address pod-to-pod
+                    # (0.0.0.0 would resolve to the NMS pod's own loopback).
+                    - address: ${POD_IP}
+                      port: 9090
+                guami:
+                  - plmn_id:
+                      mcc: 001
+                      mnc: 01
+                    amf_id:
+                      region: 2
+                      set: 1
+                tai:
+                  - plmn_id:
+                      mcc: 001
+                      mnc: 01
+                    tac: 7
+                plmn_support:
+                  - plmn_id:
+                      mcc: 001
+                      mnc: 01
+                    s_nssai:
+                      - sst: 1
+                      - sst: 2
+                security:
+                  integrity_order:
+                    - NIA2
+                    - NIA1
+                    - NIA0
+                  ciphering_order:
+                    - NEA0
+                    - NEA1
+                    - NEA2
+                time:
+                  t3512:
+                    value: 5400
+                  t3502:
+                    value: 10800
+                network_name:
+                  full: oai-lab
+              YAML
+              exec /usr/bin/open5gs-amfd -c /tmp/amf.yaml
+          ports:
+            - containerPort: 38412
+              protocol: SCTP
+              name: ngap
+            - containerPort: 7777
+              name: sbi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-amf
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "amf") | nindent 4 }}
+spec:
+  # headless: gNB -> AMF SCTP must reach the pod IP, no NAT
+  clusterIP: None
+  # AMF binds its advertise FQDN by resolving it at startup: the name must
+  # resolve even while the pod is still NotReady, or open5gs-amfd aborts in a
+  # CrashLoopBackOff that never heals (CoreDNS drops not-ready endpoints).
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: amf
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 38412
+      protocol: SCTP
+      name: ngap
+{{- end }}

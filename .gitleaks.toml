@@ -1,0 +1,10 @@
+# ue{1,2}.conf hold the canonical open5gs/OAI sample subscriber values (not secrets).
+# The k8s chart ships the same test values (K, OPc) in values.yaml and in the
+# seeded-subscriber manifest; the gNB config comments name them explicitly.
+[extend]
+useDefault = true
+
+[allowlist]
+  paths = ['''^deploy/rfsim-compose/config/oai/ue[12]\.conf$''',
+           '''^deploy/k8s/values\.yaml$''',
+           '''^deploy/k8s/templates/ran-subscribers\.yaml$''']

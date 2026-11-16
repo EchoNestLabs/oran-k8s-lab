@@ -1,0 +1,178 @@
+{{- /* gNB: rfsim gNB image, StatefulSet(1) + headless Service on rfsim 4043.
+     Ordering: init-wait for AMF (NGAP) and RIC (E2) readiness.
+     Values toggle: ran.enabled. */}}
+{{- if .Values.ran.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-gnb-config
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "gnb") | nindent 4 }}
+data:
+  gnb.yaml: |
+    cu_cp:
+      amf:
+        no_core: false
+        addr: __AMF_ADDR__
+        port: 38412
+        bind_addr: __POD_IP__
+        supported_tracking_areas:
+        - tac: 7
+          plmn_list:
+          - plmn: '00101'
+            tai_slice_support_list:
+            - sst: 1
+            - sst: 2
+      inactivity_timer: 7200
+    ru_sdr:
+      device_driver: rfsimulator
+      device_args: serverport=4043
+      srate: 23.04
+      tx_gain: 0
+      rx_gain: 0
+    cell_cfg:
+      dl_arfcn: 632628
+      band: 78
+      channel_bandwidth_MHz: 20
+      common_scs: 30
+      plmn: '00101'
+      tac: 7
+      pci: 1
+      # Slice resource partitioning at config time (sst2 gets the big floor).
+      slicing:
+        - sst: 1
+          sched_cfg:
+            min_prb_policy_ratio: 15
+            max_prb_policy_ratio: 40
+        - sst: 2
+          sched_cfg:
+            min_prb_policy_ratio: 80
+            max_prb_policy_ratio: 100
+      pdsch:
+        min_ue_mcs: 0
+        max_ue_mcs: 16
+        mcs_table: qam64
+      tdd_ul_dl_cfg:
+        dl_ul_tx_period: 5
+        nof_dl_slots: 3
+        nof_dl_symbols: 10
+        nof_ul_slots: 1
+        nof_ul_symbols: 2
+      csi:
+        csi_rs_enabled: true
+      pucch:
+        nof_cell_csi_res: 1
+    log:
+      filename: /tmp/gnb.log
+      all_level: info
+      hex_max_size: 0
+    pcap:
+      mac_enable: false
+      mac_filename: /tmp/gnb_mac.pcap
+      ngap_enable: false
+      ngap_filename: /tmp/gnb_ngap.pcap
+    e2:
+      enable_cu_cp_e2: true
+      enable_du_e2: true
+      e2sm_kpm_enabled: true
+      e2sm_rc_enabled: true
+      e2sm_ccc_enabled: true
+      addrs:
+      - __RIC_ADDR__
+      port: 36421
+      bind_addrs:
+      - __POD_IP__
+    metrics:
+      enable_log: true
+      layers:
+        enable_rrc: __EN_RRC__
+        enable_ngap: __EN_NGAP__
+        enable_rlc: true
+        enable_sched: true
+        enable_sched_ue: true
+    expert_phy:
+      prach_th_correction_factor: 0.3
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-gnb
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "gnb") | nindent 4 }}
+spec:
+  serviceName: {{ .Release.Name }}-gnb
+  replicas: 1
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "gnb") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "gnb") | nindent 8 }}
+    spec:
+      # NOTE: readiness is exec-based. A tcpSocket probe on 4043 would look
+      # like a UE dial-in and can disturb the gNB (Advisor note).
+      initContainers:
+        {{- include "oran-lab.waitfor" (dict
+              "ctx" .
+              "waitName" "wait-amf"
+              "waitHost" (printf "%s-amf" .Release.Name)
+              "waitPort" "38412"
+              "waitProto" "sctp") | nindent 8 }}
+        {{- include "oran-lab.waitfor" (dict
+              "ctx" .
+              "waitName" "wait-ric"
+              "waitHost" (printf "%s-ric" .Release.Name)
+              "waitProto" "sctp"
+              "waitPort" "36421") | nindent 8 }}
+      containers:
+        - name: gnb
+          image: "{{ .Values.images.gnb.repository }}:{{ .Values.images.gnb.tag }}"
+          imagePullPolicy: Never
+          # gNB is the rfsim TCP SERVER on 4043: UEs dial IN to it. It must be
+          # reachable at a stable DNS name -> headless Service below.
+          # Metrics gates: upstream defaults are false and yield zeroed KPM
+          # counters; values.gnb.metrics forces them on (values templated in
+          # the entrypoint).
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              sed -e "s/__AMF_ADDR__/{{ .Release.Name }}-amf/" \
+                  -e "s/__RIC_ADDR__/{{ .Release.Name }}-ric/" \
+                  -e "s/__POD_IP__/${POD_IP}/" \
+                  -e "s/__EN_RRC__/{{ .Values.gnb.metrics.enableRrc | toString | lower }}/" \
+                  -e "s/__EN_NGAP__/{{ .Values.gnb.metrics.enableNgap | toString | lower }}/" \
+                  /config/gnb.yaml > /tmp/gnb.yaml
+              # gNB binds rfsim to POD_IP:4043 (via yaml __POD_IP__)
+              exec /usr/local/bin/gnb -c /tmp/gnb.yaml
+          env:
+            {{- include "oran-lab.podip" (dict "podIpEnvVar" "POD_IP") | nindent 12 }}
+          ports:
+            - containerPort: 4043
+              protocol: TCP
+              name: rfsim
+          readinessProbe:
+            exec:
+              command: ["sh","-c","grep -q 'rfsim.*listening\\|server.*4043' /tmp/gnb.log 2>/dev/null || grep -qiE 'started|ready' /tmp/gnb.log 2>/dev/null"]
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 60
+          volumeMounts:
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-gnb-config
+          # note: entrypoint seds /config/gnb.yaml -> /tmp/gnb.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-gnb
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "gnb") | nindent 4 }}
+spec:
+  clusterIP: None   # UEs dial the pod IP directly on 4043
+  selector:
+    app.kubernetes.io/name: gnb
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 4043
+      name: rfsim
+{{- end }}

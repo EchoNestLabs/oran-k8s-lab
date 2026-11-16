@@ -1,0 +1,85 @@
+{{- /* Subscriber seeding: post-install/post-upgrade hook — mongodb must already
+     exist when the Job runs (pre-install FAILS cold: lab-mongodb does not exist
+     before install). UEs retry registration continuously, so seeding moments
+     after the core starts is safe.
+     ue0 also gets the slice-2 (VIP) entry the gNB advertises.
+     Gated on ran.enabled (UEs are its consumers). Values toggle: ran.enabled. */}}
+{{- if .Values.ran.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-subscribers
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "subscribers") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "subscribers") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: dbinit
+          image: "{{ .Values.images.mongodb.repository }}:{{ .Values.images.mongodb.tag }}"
+          imagePullPolicy: Never
+          command: ["mongosh"]
+          args:
+            - "--quiet"
+            - "mongodb://{{ .Release.Name }}-mongodb/open5gs"
+            - "--eval"
+            - |
+              // Idempotent seed: full subscriber doc per open5gs v2.8.0 schema
+              // (shape mirrors open5gs-dbctl add). Slice 0 = sst1 (default),
+              // slice 1 = sst2 (the VIP slice the gNB advertises).
+              function sub(imsi, k, opc) {
+                return {
+                  _id: new ObjectId(),
+                  schema_version: NumberInt(1),
+                  imsi: imsi,
+                  msisdn: [], imeisv: [], mme_host: [], mm_realm: [], purge_flag: [],
+                  slice: [
+                    { sst: NumberInt(1), default_indicator: true,
+                      session: [ { name: "internet", type: NumberInt(3),
+                        qos: { index: NumberInt(9),
+                          arp: { priority_level: NumberInt(8),
+                            pre_emption_capability: NumberInt(1),
+                            pre_emption_vulnerability: NumberInt(2) } },
+                        ambr: { downlink: { value: NumberInt(1000000000), unit: NumberInt(0) },
+                                uplink:   { value: NumberInt(1000000000), unit: NumberInt(0) } },
+                        pcc_rule: [], _id: new ObjectId() } ],
+                      _id: new ObjectId() },
+                    { sst: NumberInt(2),
+                      session: [ { name: "internet", type: NumberInt(3),
+                        qos: { index: NumberInt(9),
+                          arp: { priority_level: NumberInt(8),
+                            pre_emption_capability: NumberInt(1),
+                            pre_emption_vulnerability: NumberInt(2) } },
+                        ambr: { downlink: { value: NumberInt(1000000000), unit: NumberInt(0) },
+                                uplink:   { value: NumberInt(1000000000), unit: NumberInt(0) } },
+                        pcc_rule: [], _id: new ObjectId() } ],
+                      _id: new ObjectId() }
+                  ],
+                  security: { k: k, op: null, opc: opc, amf: "8000" },
+                  ambr: { downlink: { value: NumberInt(1000000000), unit: NumberInt(0) },
+                          uplink:   { value: NumberInt(1000000000), unit: NumberInt(0) } },
+                  access_restriction_data: 32,
+                  network_access_mode: 0,
+                  subscriber_status: 0,
+                  operator_determined_barring: 0,
+                  subscribed_rau_tau_timer: 12,
+                  __v: 0
+                };
+              }
+              const K = "00112233445606778899aabbccddeeff", OPC = "63bfa50ee6523365ff14c1f45f88737d";
+              for (const imsi of ["001010123456780","001010123456781","001010123456783","001010123456784"]) {
+                if (db.subscribers.countDocuments({ imsi: imsi }) === 0) {
+                  db.subscribers.insertOne(sub(imsi, K, OPC));
+                  print("added " + imsi);
+                } else { print("exists " + imsi); }
+              }
+              print("SUBSCRIBERS-SEEDED");
+{{- end }}

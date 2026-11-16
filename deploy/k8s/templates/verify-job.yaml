@@ -1,0 +1,170 @@
+{{- /* helm test verify Job: port of verify.sh gates, adapted to what the
+     lab actually ships (no Prometheus in bring-up, no ping binary in the UE
+     image).
+     GATE 1: UE data plane - ICMP echo to the core UPF (10.45.0.1) over the
+             UE TUN (oaitun_ueN) via a python3 raw socket, exec'd into each
+             UE pod. The checker script comes from a ConfigMap and is piped
+             over stdin (kubectl exec -i ... python3 - < script).
+     GATE 2: E2 path - the kpm-hello xApp loop logs "Connected E2 nodes = N"
+             with N >= 1 every cycle; grep its pod logs.
+     Values toggle: verify.enabled. Image must be preloaded on the node
+     (imagePullPolicy: Never). */}}
+{{- if .Values.verify.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-verify-check
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "verify") | nindent 4 }}
+data:
+  check_data_plane.py: |
+    import struct, sys, socket
+    # TUN naming is not tied to the pod ordinal (OAI names the session TUN
+    # from its internal UE index), so detect the oaitun* interface instead.
+    iface = ""
+    for line in open("/proc/net/dev").read().splitlines():
+        name = line.split(":")[0].strip()
+        if name.startswith("oaitun"):
+            iface = name
+            break
+    if not iface:
+        sys.exit("no oaitun* interface (UE not attached)")
+    dst = "10.45.0.1"
+    s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+    s.setsockopt(socket.SOL_SOCKET, 25, iface.encode() + b"\0")  # SO_BINDTODEVICE
+    s.settimeout(4)
+    ident = 0x4500
+    ok = False
+    for seq in range(3):
+        hdr = struct.pack("!BBHHHBBH", 8, 0, 0, ident, seq, 64, 0, 0)
+        chk = 0
+        for i in range(0, len(hdr), 2):
+            chk += (hdr[i] << 8) + hdr[i + 1]
+        chk = (chk & 0xFFFF) + (chk >> 16)
+        pkt = struct.pack("!BBHHHBBH", 8, 0, (~chk) & 0xFFFF, ident, seq, 64, 0, 0)
+        s.sendto(pkt, (dst, 0))
+        try:
+            while True:
+                d, _ = s.recvfrom(2048)
+                if d[20] == 0 and d[24:26] == struct.pack("!H", ident):
+                    ok = True
+                    break
+        except socket.timeout:
+            continue
+        if ok:
+            break
+    if ok:
+        print("ping ok via " + iface)
+    else:
+        sys.exit("no ICMP echo-reply on " + iface)
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-verify
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "verify") | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-verify
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "verify") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/log"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-verify
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "verify") | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ .Release.Name }}-verify }
+subjects:
+  - { kind: ServiceAccount, name: {{ .Release.Name }}-verify, namespace: {{ .Release.Namespace }} }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-verify
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "verify") | nindent 4 }}
+  annotations:
+    # helm test hook
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "verify") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-verify
+      restartPolicy: Never
+      containers:
+        - name: verify
+          image: "{{ .Values.verify.image.repository }}:{{ .Values.verify.image.tag }}"
+          imagePullPolicy: Never
+          # Root is needed for the optional GATE 3 fallback (reading the
+          # node's /var/log/pods, whose files are root-only). The RIC log
+          # path via the k8s API (source 1) does not need it.
+          securityContext:
+            runAsUser: 0
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              set -e
+              REL={{ .Release.Name }}
+              NS={{ .Release.Namespace }}
+              echo "== GATE 1: UE data plane (ICMP 10.45.0.1 over oaitun_ueN) =="
+              UE_PODS=$(kubectl get pods -n $NS -l app.kubernetes.io/name=ue -o name | wc -l)
+              [ "$UE_PODS" -eq {{ .Values.ue.replicas }} ] || { echo "FAIL: $UE_PODS UE pods"; exit 1; }
+              for p in $(kubectl get pods -n $NS -l app.kubernetes.io/name=ue -o name); do
+                kubectl -n $NS exec -i "$p" -- python3 - \
+                  < /verify/check_data_plane.py > /dev/null \
+                  || { echo "FAIL: data plane $p"; exit 1; }
+              done
+              echo "GATE1 OK"
+              echo "== GATE 2: E2 path (xApp sees connected E2 nodes) =="
+              LOGS=$(kubectl -n $NS logs \
+                -l app.kubernetes.io/name=xapp-kpm-hello --tail=100 2>/dev/null || true)
+              echo "$LOGS" | grep -qE "Connected E2 nodes = [1-9]" \
+                || { echo "FAIL: no connected E2 nodes in xApp logs"; echo "$LOGS" | tail -5; exit 1; }
+              echo "GATE2 OK"
+{{- if .Values.ricBuild.cccEnabled }}
+              echo "== GATE 3: E2SM-CCC RAN function accepted at E2 Setup =="
+              # The acceptance is a one-time line, so a short --tail window
+              # misses it. Two sources are grepped:
+              #  1. the RIC pod log via its deployment name -- on k3s,
+              #     `kubectl logs -l <selector>` was observed to return a
+              #     truncated (10-line) view while deploy/<name> returned the
+              #     full log, so never query gate evidence by selector;
+              #  2. the pod's on-disk log files mounted read-only from the
+              #     node's /var/log/pods -- `kubectl logs` only shows the
+              #     CURRENT rotation segment, and kubelet log rotation can
+              #     push the one-time acceptance line out of it.
+              # Source 2 needs a root container (log files are root:root 0640).
+              RIC_LOGS=$(kubectl -n $NS logs \
+                deploy/$REL-ric 2>/dev/null || true)
+              if echo "$RIC_LOGS" | grep -qE "Accepting RAN function ID [0-9]+ with def = ORAN-E2SM-CCC"; then
+                echo "GATE3 OK"
+              elif grep -rsqE "Accepting RAN function ID [0-9]+ with def = ORAN-E2SM-CCC" /var/log/pods/; then
+                echo "GATE3 OK (from on-disk pod logs)"
+              else
+                echo "FAIL: E2SM-CCC RAN function not accepted by the RIC"
+                echo "$RIC_LOGS" | tail -5
+                exit 1
+              fi
+{{- end }}
+              echo "ALL GATES PASS"
+          volumeMounts:
+            - { name: check, mountPath: /verify }
+            - { name: podlogs, mountPath: /var/log/pods, readOnly: true }
+      volumes:
+        - name: check
+          configMap: { name: {{ .Release.Name }}-verify-check }
+        - name: podlogs
+          hostPath: { path: /var/log/pods, type: Directory }
+{{- end }}

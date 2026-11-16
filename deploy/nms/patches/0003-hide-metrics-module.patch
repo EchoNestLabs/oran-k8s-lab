@@ -1,0 +1,41 @@
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index b1cdd48..c4614f9 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -119,7 +119,7 @@ function App(): JSX.Element {
+       case 'suci':
+         return <SuciManagementPage />;
+       case 'metrics':
+-        return <MetricsPage />;
++        return FEATURES.metrics ? <MetricsPage /> : <DashboardPage />;
+       case 'traffic-history':
+         return <TrafficHistoryPage />;
+       case 'radio-signal':
+diff --git a/frontend/src/components/common/navItems.ts b/frontend/src/components/common/navItems.ts
+index 418d070..2db9bc6 100644
+--- a/frontend/src/components/common/navItems.ts
++++ b/frontend/src/components/common/navItems.ts
+@@ -47,7 +47,7 @@ export const NAV_ITEMS: NavItem[] = [
+   { id: 'suci', label: 'SUCI Keys', icon: Key },
+   { id: 'backup', label: 'Backup & Restore', icon: Database },
+   { id: 'logs', label: 'Unified Logs', icon: ScrollText, shortLabel: 'Logs' },
+-  { id: 'metrics', label: 'Metrics', icon: BarChart2 },
++  ...(FEATURES.metrics ? [{ id: 'metrics', label: 'Metrics', icon: BarChart2 }] : []),
+   { id: 'traffic-history', label: 'Traffic History', icon: TrendingUp },
+   { id: 'sas',         label: 'SAS',          icon: Shield    },
+   { id: 'time-server', label: 'Time Server',   icon: Clock     },
+diff --git a/frontend/src/config/features.ts b/frontend/src/config/features.ts
+index 5620c2d..4d94c56 100644
+--- a/frontend/src/config/features.ts
++++ b/frontend/src/config/features.ts
+@@ -63,4 +63,10 @@ export const FEATURES = {
+   // UDP/67, which a careless subnet could hand addresses out on a live segment.
+   // Bigger blast radius than a display toggle, so it is never default-on.
+   dhcp: import.meta.env.VITE_ENABLE_DHCP === 'true',
++  // Display-only toggle (default on): the Metrics page embeds Prometheus
++  // charts and links out to the Prometheus/Grafana web UIs. Deployments with
++  // no observation stack (e.g. the k8s lab chart, which ships no Prometheus)
++  // set ENABLE_METRICS_MODULE=false to hide the page instead of showing
++  // charts that can never have data.
++  metrics: import.meta.env.VITE_ENABLE_METRICS !== 'false',
+ };

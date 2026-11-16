@@ -1,0 +1,92 @@
+{{- /* UPF: needs NET_ADMIN + /dev/net/tun for ogstun; GTP-U 2152 pod-IP.
+     ip_forward setup via NET_ADMIN sysctl on the pod.
+     Values toggle: core.enabled. */}}
+{{- if .Values.core.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-upf
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "upf") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "upf") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "upf") | nindent 8 }}
+    spec:
+      # UE data subnet must not overlap the pod CIDRs (10.42/16, 10.43/16 on k3s).
+      # Privileged init: sysctl ip_forward + ogstun need writable /proc/sys and
+      # real iproute2 (busybox ip cannot create TUN devices).
+      initContainers:
+        - name: net-setup
+          image: "{{ .Values.images.open5gs.repository }}:{{ .Values.images.open5gs.tag }}"
+          imagePullPolicy: Never
+          securityContext:
+            privileged: true
+          command: ["sh","-c"]
+          args:
+            - |
+              sysctl -w net.ipv4.ip_forward=1
+              # ogstun + MASQUERADE for the UE subnet (values-driven)
+              (ip tuntap add mode tun ogstun 2>/dev/null || true)
+              ip addr add {{ .Values.upf.ueSubnet }} dev ogstun 2>/dev/null || true
+              ip link set ogstun up
+      containers:
+        - name: upf
+          image: "{{ .Values.images.open5gs.repository }}:{{ .Values.images.open5gs.tag }}"
+          imagePullPolicy: Never
+          securityContext:
+            capabilities: { add: ["NET_ADMIN"] }
+          volumeMounts:
+            - { name: net-tun, mountPath: /dev/net/tun }
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              # Full K8s-native config. PFCP advertises the POD IP so the SMF
+              # sends downlink F-TEIDs to the pod directly (headless service).
+              cat > /tmp/upf.yaml <<YAML
+              upf:
+                pfcp:
+                  server:
+                    - address: 0.0.0.0
+                      advertise: ${POD_IP}
+                gtpu:
+                  server:
+                    - address: ${POD_IP}
+                session:
+                  - subnet: 10.45.0.0/16
+                    gateway: 10.45.0.1
+                metrics:
+                  server:
+                    - address: 0.0.0.0
+                      port: 9090
+              YAML
+              exec /usr/bin/open5gs-upfd -c /tmp/upf.yaml
+          env:
+            {{- include "oran-lab.podip" (dict "podIpEnvVar" "POD_IP") | nindent 12 }}
+          ports:
+            - containerPort: 2152
+              protocol: UDP
+              name: gtpu
+            - containerPort: 7777
+              name: sbi
+      volumes:
+        - name: net-tun
+          hostPath: { path: /dev/net/tun, type: CharDevice }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-upf
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "upf") | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: upf
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 2152
+      protocol: UDP
+      name: gtpu
+{{- end }}

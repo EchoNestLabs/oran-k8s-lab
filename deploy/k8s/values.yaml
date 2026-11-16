@@ -1,0 +1,194 @@
+# Global values for the oran-rfsim-lab chart .
+
+# Image tags. Pin by digest in production. During the first k3s bring-up the
+# gnb/ric/xapps images are build-on-node (no registry); push only after all
+# verification gates pass.
+images:
+  # gNB: rfsim gNB image v2 with E2SM-CCC codec compatibility (the FlexRIC
+  # v3 control JSON form is accepted alongside the wrapped form). The image
+  # is preloaded into the node's containerd store like every other lab image.
+  gnb:
+    repository: gnb-rfsim
+    tag: v2
+  ue:
+    repository: oai-ue
+    tag: v1
+  # FlexRIC: E2AP_V3 + KPM_V3_00 build, service models rebuilt in-image for ABI consistency
+  ric:
+    repository: flexric
+    tag: v1
+  # xApps built FROM the ric image so the service-model libs match
+  xapps:
+    repository: flexric
+    tag: v1
+  mongodb:
+    repository: mongo
+    tag: "6.0"
+  open5gs:
+    repository: oran/open5gs
+    tag: v2.8.0
+  # NMS (open5gs-nms topology/monitoring UI). Built by deploy/nms/build.sh from
+  # upstream https://github.com/paulmataruso/open5gs-nms at the pinned SHA
+  # (tag = SHA); preloaded into the node's containerd store like every other
+  # lab image, so imagePullPolicy stays Never.
+  nmsBackend:
+    repository: oran/open5gs-nms-backend
+    tag: "54c405d634768c4cb27d3ef52d6e9c6114695aad"
+  nmsFrontend:
+    repository: oran/open5gs-nms-frontend
+    tag: "54c405d634768c4cb27d3ef52d6e9c6114695aad"
+  nmsNginx:
+    repository: nginx
+    tag: alpine
+
+# NMS add-on: Open5GS web management UI (topology, NF status, UE list).
+# The backend needs hostPID to see NF daemon processes in /proc and a
+# config-sync sidecar that copies the live NF yamls out of the NF pods —
+# both safe on a single-node lab where this chart is the only tenant.
+# NMS failure must NEVER block bring-up: nothing in lab-bringup or the helm
+# test depends on it.
+nms:
+  enabled: true
+  hostPort: 8888
+  # Admin password seeding: lab-bringup reads the launcher's user-data
+  # (marker NMS_PASSWORD=<pw>) and creates Secret lab-nms-firstrun, which
+  # the backend consumes via secretKeyRef. No marker -> the backend prints
+  # a random first-run password to its logs. NEVER put a password here.
+
+# Feature toggles, one per template folder.
+core:
+  enabled: true
+ran:
+  enabled: true
+ric:
+  enabled: true
+xapps:
+  enabled: true
+  list:
+    # kpm-hello is a finite smoke test: it subscribes to the E2 nodes, reads the
+    # supported RAN functions (KPM/RC/CCC) and exits. Loop it so the pod stays up
+    # and the E2 path is re-proven every 30s. The upstream monitor examples
+    # (xapp_kpm_moni / xapp_rc_moni) segfault with KPM v3.00 SMs, so they are not
+    # shipped here.
+    # NOTE: no `head` truncation — head exits after N lines and the SIGPIPE can
+    # kill xapp_hw mid E2 handshake, before it ever prints "Connected E2
+    # nodes". timeout bounds a hung E2 connect instead.
+    - name: kpm-hello
+      command: "while true; do timeout 25 /usr/local/flexric/xApp/c/helloworld/xapp_hw 2>&1 | grep -viE 'warning|scheduling'; echo ---; sleep 30; done"
+
+# FlexRIC build-time service model versions; baked into the ric image.
+ricBuild:
+  e2apVersion: E2AP_V3
+  kpmVersion: KPM_V3_00
+  # Test-gate toggle ONLY (does not rebuild the RIC or change CCC behavior):
+  # when true, helm test asserts that the gNB's E2SM-CCC RAN function was
+  # accepted at E2 Setup (the RIC already accepts it — RAN function ID 4).
+  # Control actuation over CCC is roadmap (no public control sample ships).
+  cccEnabled: false
+
+# gNB KPM metrics gates: defaults are FALSE upstream and yield all-zero counters,
+# which the verify Job treats as a failure. Keep enabled.
+gnb:
+  metrics:
+    enableRrc: true
+    enableNgap: true
+
+# UE data-plane subnet; MUST NOT overlap k3s pod/service CIDRs (10.42/16,
+# 10.43/16 by default).
+upf:
+  ueSubnet: 10.45.0.1/24
+
+# UE count: ordinal index ue0..ueN-1 maps to the configs list.
+ue:
+  replicas: 4
+  radio:
+    band: 78
+  # Per-ordinal UE configs; ordinal 0 is the slice-2 (VIP) UE. __GNB_ADDR__
+  # is seds to the gNB headless service name by the pod entrypoint.
+  configs:
+    - |
+      uicc0 = {
+        imsi = "001010123456780";
+        key = "00112233445606778899aabbccddeeff";
+        opc = "63bfa50ee6523365ff14c1f45f88737d";
+        dnn = "internet";
+        nssai_sst = 1;
+      };
+      # carrier params in conf (native-lab style); E=1 -> 23.04 Msps
+      # matching gNB srate (30.72 default breaks rfsim sync)
+      r               = 51;
+      numerology      = 1;
+      band            = 78;
+      C               = 3489420000;
+      ue-scan-carrier = 1;
+      E               = 1;
+      uecap_file      = "/src/targets/PROJECTS/GENERIC-NR-5GC/CONF/uecap_ports1.xml";
+      rfsimulator = ( { serveraddr = "__GNB_ADDR__"; serverport = 4043; } );
+      log_config: { global_log_level = "info"; hw_log_level = "info"; phy_log_level = "info"; mac_log_level = "info"; };
+    - |
+      uicc0 = {
+        imsi = "001010123456781";
+        key = "00112233445606778899aabbccddeeff";
+        opc = "63bfa50ee6523365ff14c1f45f88737d";
+        dnn = "internet";
+        nssai_sst = 1;
+      };
+      # carrier params in conf (native-lab style); E=1 -> 23.04 Msps
+      # matching gNB srate (30.72 default breaks rfsim sync)
+      r               = 51;
+      numerology      = 1;
+      band            = 78;
+      C               = 3489420000;
+      ue-scan-carrier = 1;
+      E               = 1;
+      uecap_file      = "/src/targets/PROJECTS/GENERIC-NR-5GC/CONF/uecap_ports1.xml";
+      rfsimulator = ( { serveraddr = "__GNB_ADDR__"; serverport = 4043; } );
+      log_config: { global_log_level = "info"; hw_log_level = "info"; phy_log_level = "info"; mac_log_level = "info"; };
+    - |
+      uicc0 = {
+        imsi = "001010123456783";
+        key = "00112233445606778899aabbccddeeff";
+        opc = "63bfa50ee6523365ff14c1f45f88737d";
+        dnn = "internet";
+        nssai_sst = 1;
+      };
+      # carrier params in conf (native-lab style); E=1 -> 23.04 Msps
+      # matching gNB srate (30.72 default breaks rfsim sync)
+      r               = 51;
+      numerology      = 1;
+      band            = 78;
+      C               = 3489420000;
+      ue-scan-carrier = 1;
+      E               = 1;
+      uecap_file      = "/src/targets/PROJECTS/GENERIC-NR-5GC/CONF/uecap_ports1.xml";
+      rfsimulator = ( { serveraddr = "__GNB_ADDR__"; serverport = 4043; } );
+      log_config: { global_log_level = "info"; hw_log_level = "info"; phy_log_level = "info"; mac_log_level = "info"; };
+    - |
+      uicc0 = {
+        imsi = "001010123456784";
+        key = "00112233445606778899aabbccddeeff";
+        opc = "63bfa50ee6523365ff14c1f45f88737d";
+        dnn = "internet";
+        nssai_sst = 1;
+      };
+      # carrier params in conf (native-lab style); E=1 -> 23.04 Msps
+      # matching gNB srate (30.72 default breaks rfsim sync)
+      r               = 51;
+      numerology      = 1;
+      band            = 78;
+      C               = 3489420000;
+      ue-scan-carrier = 1;
+      E               = 1;
+      uecap_file      = "/src/targets/PROJECTS/GENERIC-NR-5GC/CONF/uecap_ports1.xml";
+      rfsimulator = ( { serveraddr = "__GNB_ADDR__"; serverport = 4043; } );
+      log_config: { global_log_level = "info"; hw_log_level = "info"; phy_log_level = "info"; mac_log_level = "info"; };
+
+obs:
+  enabled: true
+verify:
+  enabled: true
+  image:
+    # bitnami/kubectl:1.30 was archived out of the main bitnami repo; the
+    # frozen 1.30 tag lives in bitnamilegacy. Preloaded on the lab node.
+    repository: bitnamilegacy/kubectl
+    tag: "1.30"

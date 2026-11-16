@@ -1,0 +1,16 @@
+apiVersion: v2
+name: oran-rfsim-lab
+description: >
+  O-RAN rf-simulated lab on Kubernetes: Open5GS 5GC, rfsim gNB image gNB
+  (rf-simulator), OAI nr-UE pods, FlexRIC near-RT RIC and sample xApps.
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+dependencies:
+  # Component charts live under charts/. Each is independently enableable:
+  #   core   - mongodb + open5gs NFs (amf, smf, upf, nrf)
+  #   ran    - gnb (rfsim gNB image) + ue (OAI nr-UE, StatefulSet, replicas=4)
+  #   ric    - FlexRIC nearRT-RIC + sample xApps (kpm-hello, kpm-exporter)
+  #   obs    - Prometheus + Grafana (kube-prometheus-stack based)
+  # Ordering is enforced with init-container waits, not install order:
+  #   ric -> gnb -> ue, and amf -> gnb.

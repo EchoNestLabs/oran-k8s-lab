@@ -1,0 +1,70 @@
+{{- /* UEs: OAI nr-UE StatefulSet, one replica per UE; ordinal 0..N-1 selects
+     the IMSI/config via the ue index. Init-waits for the gNB on rfsim 4043.
+     Each pod needs NET_ADMIN + /dev/net/tun for its oaitun data interface.
+     Values toggle: ran.enabled. */}}
+{{- if .Values.ran.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-ue
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "ue") | nindent 4 }}
+spec:
+  serviceName: {{ .Release.Name }}-ue
+  replicas: {{ .Values.ue.replicas }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: {{- include "oran-lab.selectorLabels" (dict "ctx" . "component" "ue") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "ue") | nindent 8 }}
+    spec:
+      # No tcpSocket probe on the UE either (its rfsim CLIENT port matters less,
+      # but stay consistent: exec/log gates only).
+      initContainers:
+        {{- include "oran-lab.waitfor" (dict
+              "ctx" .
+              "waitName" "wait-gnb"
+              "waitHost" (printf "%s-gnb" .Release.Name)
+              "waitPort" "4043") | nindent 8 }}
+      containers:
+        - name: ue
+          image: "{{ .Values.images.ue.repository }}:{{ .Values.images.ue.tag }}"
+          imagePullPolicy: Never
+          securityContext:
+            capabilities: { add: ["NET_ADMIN"] }
+          volumeMounts:
+            - { name: net-tun, mountPath: /dev/net/tun }
+            - { name: ue-config, mountPath: /config }
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              ORD=${HOSTNAME##*-}
+              # OAI-fork rfsim UE: rfsim params ride the
+              # conf only (CLI rfsimulator.serveraddr is unknown there), and
+              # carrier params (r/numerology/band/E) come from conf too.
+              # Mirrors the proven native launch start_ue_rfsim_b*.sh.
+              sed -e "s/__GNB_ADDR__/{{ .Release.Name }}-gnb/" \
+                /config/ue${ORD}.conf > /tmp/ue.conf
+              exec /src/cmake_targets/ran_build/build/nr-uesoftmodem \
+                -O /tmp/ue.conf -C 3489420000 --rfsim --log_config.NAS_debug 1 \
+                2>&1 | tee /tmp/ue.log
+        # data-plane checks (ping/iperf) run via kubectl exec into these pods
+      volumes:
+        - name: net-tun
+          hostPath: { path: /dev/net/tun, type: CharDevice }
+        - name: ue-config
+          configMap: { name: {{ .Release.Name }}-ue-config }
+---
+{{- /* ConfigMap holds UE configs; keys ue0.conf..ueN.conf match ordinals.
+     Real IMSI/keys come from values (values.ue.configs) rendered here. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-ue-config
+  labels: {{- include "oran-lab.labels" (dict "ctx" . "component" "ue") | nindent 4 }}
+data:
+{{- range $i, $cfg := .Values.ue.configs }}
+  ue{{ $i }}.conf: |
+{{ $cfg | indent 4 }}
+{{- end }}
+{{- end }}
