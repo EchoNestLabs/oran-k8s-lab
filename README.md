@@ -89,6 +89,7 @@ AMI name: `oran-lab-k8s-v0.4.0-ubuntu22.04-x86_64`
 | Region | AMI ID |
 |---|---|
 | `eu-north-1` (Stockholm) | `ami-00b75950ed204e3a5` |
+| `us-east-1` (N. Virginia) | `ami-06f379eace8eb0881` |
 
 Before you launch, a few things worth knowing:
 
