@@ -40,6 +40,7 @@ images:
   nmsNginx:
     repository: nginx
     tag: alpine
+  # Prometheus image is pinned in the top-level `prometheus:` block below.
 
 # NMS add-on: Open5GS web management UI (topology, NF status, UE list).
 # The backend needs hostPID to see NF daemon processes in /proc and a
@@ -185,6 +186,14 @@ ue:
 
 obs:
   enabled: true
+# Prometheus: off by default, enable for the NMS Traffic History tab.
+# Requires the prom/prometheus image preloaded into the node's containerd
+# store (it ships in the machine image).
+prometheus:
+  enabled: false
+  image:
+    repository: prom/prometheus
+    tag: v2.53.0
 verify:
   enabled: true
   image:

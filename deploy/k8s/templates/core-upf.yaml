@@ -71,6 +71,51 @@ spec:
               name: gtpu
             - containerPort: 7777
               name: sbi
+      {{- if .Values.prometheus.enabled }}
+        # ogstun byte counters for the NMS Traffic History tab. ogstun is
+        # visible ONLY inside this pod's netns, so the exporter must live in
+        # this pod. It reuses the NMS backend image (already preloaded) and
+        # emits the exact series the tab's PromQL expects:
+        # open5gs_gtp_{rx,tx}_bytes_total{dnn="internet"}.
+        # NOTE: shipping this sidecar restarts the UPF pod and drops the UE
+        # data plane; run the sequenced recovery right after an upgrade
+        # (UPF ready -> SMF restart -> force-delete UEs) — SMF caches the
+        # UPF pod IP at startup and never re-associates on its own.
+        - name: ogstun-metrics
+          image: "{{ .Values.images.nmsBackend.repository }}:{{ .Values.images.nmsBackend.tag }}"
+          imagePullPolicy: Never
+          command: ["node", "-e"]
+          args:
+            - |
+              const http = require('http'), fs = require('fs');
+              const read = (f) => Number(fs.readFileSync(f, 'utf8').trim());
+              const snap = () => {
+                let out = '';
+                try {
+                  const rx = read('/sys/class/net/ogstun/statistics/rx_bytes');
+                  const tx = read('/sys/class/net/ogstun/statistics/tx_bytes');
+                  out = '# HELP open5gs_gtp_rx_bytes_total ogstun received bytes (UE uplink)\n' +
+                        '# TYPE open5gs_gtp_rx_bytes_total counter\n' +
+                        'open5gs_gtp_rx_bytes_total{dnn="internet"} ' + rx + '\n' +
+                        '# HELP open5gs_gtp_tx_bytes_total ogstun sent bytes (UE downlink)\n' +
+                        '# TYPE open5gs_gtp_tx_bytes_total counter\n' +
+                        'open5gs_gtp_tx_bytes_total{dnn="internet"} ' + tx + '\n';
+                } catch (e) {
+                  out = '# ogstun not present yet: ' + e.message + '\n';
+                }
+                return out;
+              };
+              http.createServer((req, res) => {
+                res.writeHead(200, {'Content-Type': 'text/plain'});
+                res.end(snap());
+              }).listen(9105);
+          ports:
+            - containerPort: 9105
+              name: ogstun-metrics
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+      {{- end }}
       volumes:
         - name: net-tun
           hostPath: { path: /dev/net/tun, type: CharDevice }

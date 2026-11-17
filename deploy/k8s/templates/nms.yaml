@@ -142,6 +142,11 @@ spec:
                   # first-run password (printed to the backend pod logs).
                   optional: true
             - { name: COOKIE_SECURE, value: "false" }
+            {{- if .Values.prometheus.enabled }}
+            # Backs the Traffic History tab (PromQL query_range against this
+            # URL, see obs/prometheus.yaml). Points at the headless Service.
+            - { name: PROMETHEUS_URL, value: "http://{{ .Release.Name }}-prometheus.{{ .Release.Namespace }}.svc.cluster.local:9090" }
+            {{- end }}
           ports: [{ containerPort: 3001 }, { containerPort: 3002 }]
           volumeMounts:
             - { name: open5gs-config, mountPath: /etc/open5gs, readOnly: true }
