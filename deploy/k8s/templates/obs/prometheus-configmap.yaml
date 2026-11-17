@@ -1,0 +1,73 @@
+{{- if .Values.prometheus.enabled }}
+# Scrape config for the lab Prometheus (see the Deployment in prometheus.yaml).
+# Kept in its own file so the Deployment can checksum it and roll on changes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-prometheus-config
+  labels: {{- include "oran-lab.labels" (dict "ctx" $ "component" "prometheus") | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 30s
+    scrape_configs:
+      # The NMS backend's own exporter: health gauges and NF status. The
+      # traffic-history series (open5gs_gtp_*) come from the ogstun sidecar
+      # job below; anything the backend happens to emit with those names is
+      # dropped here so the aggregate query always has exactly one series.
+      - job_name: nms
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            action: drop
+            regex: open5gs_(gtp|gsm2g_gtp|subscriber|gsm2g_subscriber)_(rx|tx|up|down)_bytes_total
+        static_configs:
+          - targets: ['{{ .Release.Name }}-nms-backend:3001']
+      # Open5GS NF metrics on their pod IPs (pod discovery via the lab's
+      # name labels; only pods with a name label that implies an NF and
+      # :9090 reachable are kept — gNB/UE/RIC have no /metrics there and
+      # simply fail their targets without affecting the rest).
+      - job_name: open5gs
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [{{ .Release.Namespace | quote }}]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            action: keep
+            # Only these NFs ship an Open5GS metrics server (:9090) in this chart.
+            regex: (amf|smf|upf)
+          - source_labels: [__meta_kubernetes_pod_phase]
+            action: drop
+            regex: (Succeeded|Failed)
+          # The UPF pod also declares the ogstun-metrics sidecar port (:9105);
+          # without this drop the rewrite below would duplicate it as a :9090
+          # target (it is scraped by the dedicated ogstun job instead).
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            action: drop
+            regex: "9105"
+          - source_labels: [__address__]
+            action: replace
+            regex: ([^:]+)(:\d+)?
+            replacement: ${1}:9090
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            target_label: nf
+      # ogstun counters from the sidecar in the UPF pod (same pod, port 9105).
+      # Keyed on the declared container port so only the sidecar is scraped.
+      - job_name: ogstun
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [{{ .Release.Namespace | quote }}]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            action: keep
+            regex: "9105"
+          - source_labels: [__meta_kubernetes_pod_phase]
+            action: drop
+            regex: (Succeeded|Failed)
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            target_label: nf
+{{- end }}

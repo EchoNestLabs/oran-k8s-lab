@@ -189,6 +189,11 @@ obs:
 # Prometheus: off by default, enable for the NMS Traffic History tab.
 # Requires the prom/prometheus image preloaded into the node's containerd
 # store (it ships in the machine image).
+# NOTE: enabling this adds the ogstun-metrics sidecar to the UPF pod, which
+# restarts the UPF and drops the UE data plane. After the upgrade run the
+# sequenced recovery BEFORE relying on traffic: wait for the UPF rollout,
+# restart SMF (it caches the UPF pod IP at startup), then force-delete the
+# UE pods and let them re-attach.
 prometheus:
   enabled: false
   image:

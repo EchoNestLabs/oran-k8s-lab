@@ -40,7 +40,7 @@ use exec/log gating.
 
 | Resource | Kind | Notes |
 |---|---|---|
-| `$RELEASE-prometheus` | Deployment (or kube-prometheus-stack) | Not part of the current bring-up (values toggle pending); NF metrics bind to pod IPs for a later pod-discovery scrape. |
+| `$RELEASE-prometheus` | Deployment (optional) | Ships behind the `prometheus.enabled` values toggle, which backs the NMS Traffic History tab. Its image (`prom/prometheus`) must be preloaded into the node's containerd store like every other lab image. Enabling it also adds an ogstun-metrics sidecar to the UPF pod, which restarts the UPF; run the SMF restart and UE re-attach recovery documented in `values.yaml` afterward. |
 | `$RELEASE-grafana` | Deployment + Service (Ingress optional) | Same status. |
 
 ## verification

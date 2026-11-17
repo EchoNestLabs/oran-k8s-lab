@@ -1,74 +1,12 @@
 {{- if .Values.prometheus.enabled }}
 # Minimal Prometheus for the NMS Traffic History tab (and any later panels).
-# Single instance, in-cluster, 24h retention. It scrapes the NMS backend's own
-# /metrics endpoint (the open5gs_* traffic counters the tab queries) and the
-# Open5GS NF metric endpoints on the pod IPs (AMF/SMF/UPF bind 0.0.0.0:9090).
+# Single instance, in-cluster, 24h retention. It scrapes three jobs (see
+# prometheus-configmap.yaml): the NMS backend health/metrics endpoint, the
+# Open5GS NF metric endpoints on the pod IPs (AMF/SMF/UPF bind 0.0.0.0:9090)
+# and the ogstun exporter sidecar in the UPF pod (:9105) which produces the
+# open5gs_gtp_* series the tab's PromQL queries.
 # Image must be preloaded into the node's containerd store, like every other
 # lab image (imagePullPolicy Never).
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ .Release.Name }}-prometheus-config
-  labels: {{- include "oran-lab.labels" (dict "ctx" $ "component" "prometheus") | nindent 4 }}
-    app.kubernetes.io/component: prometheus
-data:
-  prometheus.yml: |
-    global:
-      scrape_interval: 15s
-      evaluation_interval: 30s
-    scrape_configs:
-      # The NMS backend's own exporter: per-IMSI nftables counters and per-DNN
-      # ogstun counters. This is the data source the Traffic History tab
-      # queries (open5gs_subscriber_* and open5gs_gtp_* families).
-      - job_name: nms
-        static_configs:
-          - targets: ['{{ .Release.Name }}-nms-backend:3001']
-      # Open5GS NF metrics on their pod IPs (pod discovery via the lab's
-      # name labels; only pods with a name label that implies an NF and
-      # :9090 reachable are kept — gNB/UE/RIC have no /metrics there and
-      # simply fail their targets without affecting the rest).
-      - job_name: open5gs
-        kubernetes_sd_configs:
-          - role: pod
-            namespaces:
-              names: [{{ .Release.Namespace | quote }}]
-        relabel_configs:
-          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
-            action: keep
-            # Only these NFs ship an Open5GS metrics server (:9090) in this chart.
-            regex: (amf|smf|upf)
-          - source_labels: [__meta_kubernetes_pod_phase]
-            action: drop
-            regex: (Succeeded|Failed)
-          # The UPF pod also declares the ogstun-metrics sidecar port (:9105);
-          # without this drop the rewrite below would duplicate it as a :9090
-          # target (it is scraped by the dedicated ogstun job instead).
-          - source_labels: [__meta_kubernetes_pod_container_port_number]
-            action: drop
-            regex: "9105"
-          - source_labels: [__address__]
-            action: replace
-            regex: ([^:]+)(:\d+)?
-            replacement: ${1}:9090
-            target_label: __address__
-          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
-            target_label: nf
-      # ogstun counters from the sidecar in the UPF pod (same pod, port 9105).
-      # Keyed on the declared container port so only the sidecar is scraped.
-      - job_name: ogstun
-        kubernetes_sd_configs:
-          - role: pod
-            namespaces:
-              names: [{{ .Release.Namespace | quote }}]
-        relabel_configs:
-          - source_labels: [__meta_kubernetes_pod_container_port_number]
-            action: keep
-            regex: "9105"
-          - source_labels: [__meta_kubernetes_pod_phase]
-            action: drop
-            regex: (Succeeded|Failed)
-          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
-            target_label: nf
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -134,8 +72,11 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        # Roll the pod whenever the scrape config changes — Prometheus only
+        # reads its config at startup (no lifecycle reload endpoint wired).
+        checksum/config: {{ include (print $.Template.BasePath "/obs/prometheus-configmap.yaml") . | sha256sum }}
       labels: {{- include "oran-lab.labels" (dict "ctx" $ "component" "prometheus") | nindent 8 }}
-        app.kubernetes.io/name: prometheus
         app.kubernetes.io/component: prometheus
     spec:
       serviceAccountName: {{ .Release.Name }}-prometheus
