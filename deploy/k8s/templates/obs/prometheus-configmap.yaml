@@ -70,4 +70,23 @@ data:
             regex: (Succeeded|Failed)
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
             target_label: nf
+      # Per-subscriber counters from the ue-tunnel-metrics sidecar in each
+      # UE pod (port 9106). The imsi label is embedded in the samples by the
+      # sidecar (parsed from that pod's own UE conf, matching
+      # open5gs_radio_info) — this is what makes the Traffic History tab's
+      # subscriber / radio / RAN-type views resolvable.
+      - job_name: ue-subscribers
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [{{ .Release.Namespace | quote }}]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            action: keep
+            regex: "9106"
+          - source_labels: [__meta_kubernetes_pod_phase]
+            action: drop
+            regex: (Succeeded|Failed)
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            target_label: nf
 {{- end }}

@@ -49,6 +49,70 @@ spec:
                 -O /tmp/ue.conf -C 3489420000 --rfsim --log_config.NAS_debug 1 \
                 2>&1 | tee /tmp/ue.log
         # data-plane checks (ping/iperf) run via kubectl exec into these pods
+      {{- if .Values.prometheus.enabled }}
+        # Per-subscriber byte counters for the NMS Traffic History tab's
+        # subscriber / radio / RAN-type views. The backend resolves IMSIs via
+        # open5gs_radio_info and then queries
+        # open5gs_subscriber_{up,down}_bytes_total{imsi=~...} — but nothing
+        # ever emitted those series (the declared nftables accounting module
+        # is not part of this NMS build), so those views were permanently
+        # "No data yet". This sidecar publishes them from the one place that
+        # unambiguously sees each subscriber's traffic: the UE's own oaitun
+        # device (tx = uplink, rx = downlink). The imsi label is parsed from
+        # this pod's own UE config so it always matches open5gs_radio_info,
+        # whatever the ordinal -> IMSI mapping happens to be. Scoped out of
+        # the aggregate charts by the metric_relabel drop lists on the nms and
+        # ogstun jobs (see prometheus-configmap.yaml).
+        - name: ue-tunnel-metrics
+          image: "{{ .Values.images.nmsBackend.repository }}:{{ .Values.images.nmsBackend.tag }}"
+          imagePullPolicy: Never
+          command: ["node", "-e"]
+          args:
+            - |
+              const http = require('http'), fs = require('fs');
+              // IMSI from this pod's own UE conf (mounted here too), not the
+              // pod ordinal — the ordinal->IMSI mapping is values data.
+              const imsi = (() => {
+                try {
+                  const ord = process.env.HOSTNAME.split('-').pop();
+                  const conf = fs.readFileSync('/config/ue' + ord + '.conf', 'utf8');
+                  const m = conf.match(/imsi\s*=\s*"?(\d+)"?/);
+                  return m ? m[1] : 'unknown';
+                } catch (e) { return 'unknown'; }
+              })();
+              const snap = () => {
+                let up = 0, down = 0;
+                let note = '';
+                try {
+                  // The oaitun device appears only after PDU session setup
+                  // (and gets recreated on re-registration) — until then
+                  // serve zeros, do not crash.
+                  for (const ifc of fs.readdirSync('/sys/class/net')) {
+                    if (!ifc.startsWith('oaitun_ue')) continue;
+                    up += Number(fs.readFileSync('/sys/class/net/' + ifc + '/statistics/tx_bytes', 'utf8').trim());
+                    down += Number(fs.readFileSync('/sys/class/net/' + ifc + '/statistics/rx_bytes', 'utf8').trim());
+                  }
+                } catch (e) { note = '# read error: ' + e.message + '\n'; }
+                return '# HELP open5gs_subscriber_up_bytes_total Cumulative uplink bytes per subscriber IMSI (UE tunnel tx)\n' +
+                       '# TYPE open5gs_subscriber_up_bytes_total counter\n' +
+                       'open5gs_subscriber_up_bytes_total{imsi="' + imsi + '"} ' + up + '\n' +
+                       '# HELP open5gs_subscriber_down_bytes_total Cumulative downlink bytes per subscriber IMSI (UE tunnel rx)\n' +
+                       '# TYPE open5gs_subscriber_down_bytes_total counter\n' +
+                       'open5gs_subscriber_down_bytes_total{imsi="' + imsi + '"} ' + down + '\n' + note;
+              };
+              http.createServer((req, res) => {
+                res.writeHead(200, {'Content-Type': 'text/plain'});
+                res.end(snap());
+              }).listen(9106);
+          ports:
+            - containerPort: 9106
+              name: ue-metrics
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: ue-config, mountPath: /config, readOnly: true }
+      {{- end }}
       volumes:
         - name: net-tun
           hostPath: { path: /dev/net/tun, type: CharDevice }
