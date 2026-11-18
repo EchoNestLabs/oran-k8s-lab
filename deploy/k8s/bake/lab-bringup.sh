@@ -50,6 +50,9 @@ gnb_restarted=0
 pfcp_last=-10
 pfcp_count=0
 partial_streak=0
+gate_streak=0
+tuns=0
+ue_total=0
 ok=0
 for i in $(seq 1 48); do   # up to ~40 min
   sleep 50
@@ -147,6 +150,25 @@ for i in $(seq 1 48); do   # up to ~40 min
   if [ "$running" -eq "$total" ] && [ "$total" -ge 15 ]; then
     if helm test lab 2>&1 | grep -qi "phase: Succeeded\|SUCC"; then
       ok=1; echo "helm test PASSED"; break
+    fi
+    # The verify gate probes the DATA plane (ICMP to the core over oaitun).
+    # Known wedge: SMF caches the UPF pod IP, so a recycled UPF leaves stale
+    # PDU sessions -- a UE keeps its oaitun ROUTE (census looks 4/4) while
+    # the tunnel is dead and only the gate's ICMP catches it. When the gate
+    # keeps failing while the census is nominally healthy, run the proven
+    # sequenced PFCP recovery instead of trusting the route census.
+    gate_streak=$((gate_streak+1))
+    if [ "$gate_streak" -ge 2 ] && [ "$ue_total" -gt 0 ] && [ "$tuns" = "$ue_total" ]; then
+      echo "gate failed $gate_streak with healthy census -> sequenced PFCP recovery"
+      gate_streak=0
+      # SMF-ONLY restart (proven manual recipe). Do NOT restart the UPF here:
+      # it is healthy, and recycling it churns its pod IP, invalidates every
+      # PDU session again and keeps the wedge alive in a loop.
+      kubectl rollout restart deployment/lab-smf 2>/dev/null || true
+      kubectl rollout status deployment/lab-smf --timeout=180s 2>/dev/null || true
+      sleep 90
+      kubectl get pods -l app.kubernetes.io/name=ue -o name 2>/dev/null \
+        | xargs -r kubectl delete pod --grace-period=0 --force 2>/dev/null || true
     fi
   fi
 done
