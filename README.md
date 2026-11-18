@@ -84,12 +84,12 @@ The whole lab ships as a public EC2 machine image: a single-node k3s
 cluster with all container images preloaded, the chart installed, and a
 boot service that converges the lab on first start. No build required.
 
-AMI name: `oran-lab-k8s-v0.4.0-ubuntu22.04-x86_64`
+AMI name: `oran-lab-k8s-v0.4.2-ubuntu22.04-x86_64`
 
 | Region | AMI ID |
 |---|---|
-| `eu-north-1` (Stockholm) | `ami-00b75950ed204e3a5` |
-| `us-east-1` (N. Virginia) | `ami-06f379eace8eb0881` |
+| `eu-north-1` (Stockholm) | `ami-0af2f73d8cf8693be` |
+| `us-east-1` (N. Virginia) | `ami-0a9cff67edcd3d284` |
 
 Before you launch, a few things worth knowing:
 
