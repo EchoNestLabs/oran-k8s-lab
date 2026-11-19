@@ -76,15 +76,16 @@ for i in $(seq 1 48); do   # up to ~40 min
     echo "gNB restarted once (CFO-drift mitigation)"
     continue
   fi
-  # UE pods wedged in Error/CrashLoop -> recycle
-  # NOTE: 'kubectl get -o name' prints 'pod/<name>'; `kubectl delete pod
-  # pod/<name>` is an ARG-ORDER ERROR kubectl rejects with "there is no need
-  # to specify a resource type as a separate argument" -- previously hidden
-  # by 2>/dev/null, making these deletes silent no-ops and every PFCP
-  # recovery ineffective. Pass the resource/name directly (no literal 'pod').
+  # UE pods wedged in Error/CrashLoop -> recycle. This pipeline yields BARE
+  # pod names (kubectl get --no-headers first column), so the explicit 'pod'
+  # argument is correct here. CAUTION elsewhere: 'kubectl get -o name' prints
+  # 'pod/<name>', and `kubectl delete pod pod/<name>` is an arg-order error
+  # kubectl rejects -- use `kubectl delete pod/<name>` (type+name) for those.
+  # Keep stderr: 2>/dev/null previously hid a wrong-argument delete as a
+  # silent no-op (v0.4.4 bringup wedge).
   kubectl get pods --field-selector=status.phase!=Running --no-headers 2>/dev/null \
     | grep "^lab-ue-" | awk '{print $1}' \
-    | xargs -r kubectl delete --grace-period=0 --force 2>/dev/null || true
+    | xargs -r kubectl delete pod --grace-period=0 --force || true
 
   # Data-plane census: a UE without its TUN never recovers on its own.
   # PFCP invariant (proven on-node): SMF resolves the UPF address once at
@@ -120,7 +121,7 @@ for i in $(seq 1 48); do   # up to ~40 min
       kubectl rollout restart deployment/lab-smf 2>/dev/null || true
       kubectl rollout status deployment/lab-smf --timeout=180s 2>/dev/null || true
       sleep 20
-      kubectl delete pod -l app.kubernetes.io/name=ue --grace-period=0 --force 2>/dev/null || true
+      kubectl delete pod -l app.kubernetes.io/name=ue --grace-period=0 --force || true
     elif [ "$tuns" -gt 0 ] && [ -n "$stuck" ]; then
       partial_streak=$((partial_streak+1))
       if [ "$partial_streak" -ge 4 ]; then
@@ -131,13 +132,16 @@ for i in $(seq 1 48); do   # up to ~40 min
         partial_streak=0
         kubectl rollout restart deployment/lab-amf 2>/dev/null || true
         kubectl delete pod lab-gnb-0 --grace-period=0 --force 2>/dev/null || true
-        kubectl delete pod -l app.kubernetes.io/name=ue --grace-period=0 --force 2>/dev/null || true
+        kubectl delete pod -l app.kubernetes.io/name=ue --grace-period=0 --force || true
       else
         # Partial attach: a stuck UE sits in a PDU-establishment reject loop and
         # never recovers on its own; a pod recycle gives it a fresh NAS start.
         echo "stuck UEs:$stuck -> force-delete for fresh attach"
         for p in $stuck; do
-          kubectl delete pod "$p" --grace-period=0 --force 2>/dev/null || true
+          # $p is 'pod/<name>' from 'get -o name' -> 'kubectl delete pod/<name>'.
+          # 'kubectl delete pod $p' would duplicate the resource type and be
+          # rejected (hidden by 2>/dev/null in earlier releases).
+          kubectl delete "$p" --grace-period=0 --force || true
         done
       fi
     else
@@ -189,7 +193,7 @@ for i in $(seq 1 48); do   # up to ~40 min
         kubectl rollout status deployment/lab-smf --timeout=180s 2>/dev/null || true
         sleep 90
       fi
-      kubectl delete pod -l app.kubernetes.io/name=ue --grace-period=0 --force 2>/dev/null || true
+      kubectl delete pod -l app.kubernetes.io/name=ue --grace-period=0 --force || true
     fi
   fi
 done
