@@ -152,21 +152,40 @@ for i in $(seq 1 48); do   # up to ~40 min
       ok=1; echo "helm test PASSED"; break
     fi
     # The verify gate probes the DATA plane (ICMP to the core over oaitun).
-    # Known wedge: SMF caches the UPF pod IP, so a recycled UPF leaves stale
-    # PDU sessions -- a UE keeps its oaitun ROUTE (census looks 4/4) while
-    # the tunnel is dead and only the gate's ICMP catches it. When the gate
-    # keeps failing while the census is nominally healthy, run the proven
-    # sequenced PFCP recovery instead of trusting the route census.
+    # Two distinct wedges have been observed on cold boots:
+    #   (a) SMF caches the UPF pod IP, so a recycled UPF leaves stale PDU
+    #       sessions -- a UE keeps its oaitun ROUTE (census looks 4/4) while
+    #       the tunnel is dead. SMF-only restart fixes this one.
+    #   (b) A long-lived UPF that served multiple SMF generations ends up
+    #       with corrupt session/FAR state (SMF-only recoveries fired
+    #       repeatedly and never healed it on a bake boot). The FULL
+    #       sequenced restart -- UPF ready -> SMF restart -> delete all UEs
+    #       -- is the recipe that recovers it (UPF's pod-IP churn is only
+    #       harmful when SMF is NOT restarted after, which is why the SMF
+    #       restart must follow).
+    # Ladder: first recovery is cheap SMF-only; if the gate fails again
+    # after that, escalate to the full sequence.
     gate_streak=$((gate_streak+1))
     if [ "$gate_streak" -ge 2 ] && [ "$ue_total" -gt 0 ] && [ "$tuns" = "$ue_total" ]; then
-      echo "gate failed $gate_streak with healthy census -> sequenced PFCP recovery"
       gate_streak=0
-      # SMF-ONLY restart (proven manual recipe). Do NOT restart the UPF here:
-      # it is healthy, and recycling it churns its pod IP, invalidates every
-      # PDU session again and keeps the wedge alive in a loop.
-      kubectl rollout restart deployment/lab-smf 2>/dev/null || true
-      kubectl rollout status deployment/lab-smf --timeout=180s 2>/dev/null || true
-      sleep 90
+      if [ "${smf_only_failed:-0}" = "1" ]; then
+        echo "gate failed again after SMF-only recovery -> FULL sequenced recovery (UPF -> SMF -> UEs)"
+        smf_only_failed=0
+        kubectl rollout restart deployment/lab-upf 2>/dev/null || true
+        kubectl rollout status deployment/lab-upf --timeout=240s 2>/dev/null || true
+        kubectl rollout restart deployment/lab-smf 2>/dev/null || true
+        kubectl rollout status deployment/lab-smf --timeout=180s 2>/dev/null || true
+        sleep 90
+      else
+        echo "gate failed $gate_streak with healthy census -> sequenced PFCP recovery (SMF-only)"
+        smf_only_failed=1
+        # SMF-ONLY restart first: it is healthy in wedge (a), and recycling
+        # the UPF unnecessarily churns its pod IP and invalidates every PDU
+        # session (turning wedge (a) into (b)).
+        kubectl rollout restart deployment/lab-smf 2>/dev/null || true
+        kubectl rollout status deployment/lab-smf --timeout=180s 2>/dev/null || true
+        sleep 90
+      fi
       kubectl get pods -l app.kubernetes.io/name=ue -o name 2>/dev/null \
         | xargs -r kubectl delete pod --grace-period=0 --force 2>/dev/null || true
     fi
